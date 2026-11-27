@@ -1,169 +1,195 @@
 #include "nqueens.h"
-#include <vector>
 #include <string>
 #include <utility>
-#include <algorithm>
+#include <vector>
 
-namespace {
-const int WORDS = 3;
-const int MAXV = WORDS * 64;
-typedef unsigned long long u64;
 
-struct Set {
-    u64 w[WORDS];
+struct Bits {
+  unsigned long long a, b, c;
+};
+static inline bool isEmpty(const Bits& x) { return (x.a | x.b | x.c) == 0; }
+static inline Bits andNot(const Bits& x, const Bits& y) {
+  Bits r; r.a = x.a & ~y.a; r.b = x.b & ~y.b; r.c = x.c & ~y.c; return r;
+}
+static inline Bits andB(const Bits& x, const Bits& y) {
+  Bits r; r.a = x.a & y.a; r.b = x.b & y.b; r.c = x.c & y.c; return r;
+}
+static inline int lowest(const Bits& x) {
+  if (x.a) return __builtin_ctzll(x.a);
+  if (x.b) return 64 + __builtin_ctzll(x.b);
+  return 128 + __builtin_ctzll(x.c);
+}
+static inline void setBit(Bits& x, int i) {
+  if (i < 64) x.a |= 1ULL << i; else if (i < 128) x.b |= 1ULL << (i - 64); else x.c |= 1ULL << (i - 128);
+}
+static inline void clearBit(Bits& x, int i) {
+  if (i < 64) x.a &= ~(1ULL << i); else if (i < 128) x.b &= ~(1ULL << (i - 64)); else x.c &= ~(1ULL << (i - 128));
+}
+
+// ---------- Jalur cepat: tanpa wall = N-Queens biasa (bitmask) ----------
+struct BitSearch {
+  int n;
+  unsigned full;
+  int col[16];
+  std::vector<std::vector<std::pair<int, int> > >* out;
+  void go(int r, unsigned cols, unsigned d1, unsigned d2) {
+    if (r == n) {
+      std::vector<std::pair<int, int> > b;
+      b.reserve(n);
+      for (int i = 0; i < n; ++i) b.push_back(std::make_pair(i, col[i]));
+      out->push_back(std::move(b));
+      return;
+    }
+    unsigned avail = full & ~(cols | d1 | d2);
+    while (avail) {
+      unsigned bit = avail & (~avail + 1u);
+      avail ^= bit;
+      int c = 0;
+      while (!((bit >> c) & 1u)) ++c;
+      col[r] = c;
+      go(r + 1, cols | bit, ((d1 | bit) << 1) & full, (d2 | bit) >> 1);
+    }
+  }
 };
 
-int N;
-int cellOf[MAXV];
-Set compat[MAXV];
-int best;
-bool collect;
-int cur[MAXV];
-std::vector<std::vector<std::pair<int, int>>>* out;
+// ---------- Jalur umum: maximum independent set pada graf konflik ----------
+struct WallSearch {
+  int n, V, best;
+  bool enumerate;
+  int cellOf[144];
+  Bits adj[144];
+  int chosen[160];
+  std::vector<std::vector<std::pair<int, int> > > out;
 
-inline bool empty(const Set& s) {
-    for (int i = 0; i < WORDS; i++) if (s.w[i]) return false;
-    return true;
-}
+  void build(int n_, const std::vector<std::string>& grid) {
+    n = n_;
+    int vid[144];
+    V = 0;
+    for (int i = 0; i < n * n; ++i) vid[i] = -1;
+    int walls = 0;
+    for (int r = 0; r < n; ++r)
+      for (int c = 0; c < n; ++c)
+        if (grid[r][c] == 'W') ++walls;
+    // Penomoran sel menentukan kualitas batas atas (clique cover greedy).
+    // Wall sedikit: urutan baris-demi-baris. Wall banyak: derajat konflik menaik.
+    const int dr[4] = {0, 1, 1, 1};
+    const int dc[4] = {1, 0, 1, -1};
+    int key[144], idx[144], m = 0;
+    for (int r = 0; r < n; ++r)
+      for (int c = 0; c < n; ++c) {
+        if (grid[r][c] == 'W') continue;
+        int deg = 0;
+        if (walls >= n) {
+          for (int f = 0; f < 4; ++f)
+            for (int sg = -1; sg <= 1; sg += 2) {
+              int rr = r + sg * dr[f], cc = c + sg * dc[f];
+              while (rr >= 0 && rr < n && cc >= 0 && cc < n && grid[rr][cc] != 'W') {
+                ++deg;
+                rr += sg * dr[f];
+                cc += sg * dc[f];
+              }
+            }
+        }
+        idx[m] = r * n + c;
+        key[m] = deg;
+        ++m;
+      }
+    for (int i = 1; i < m; ++i) {  // insertion sort stabil
+      int k = key[i], x = idx[i], j = i - 1;
+      while (j >= 0 && key[j] > k) { key[j + 1] = key[j]; idx[j + 1] = idx[j]; --j; }
+      key[j + 1] = k;
+      idx[j + 1] = x;
+    }
+    for (int i = 0; i < m; ++i) { vid[idx[i]] = V; cellOf[V] = idx[i]; ++V; }
+    for (int v = 0; v < V; ++v) { adj[v].a = adj[v].b = adj[v].c = 0; }
+    // dua sel konflik jika segaris dan tidak ada wall di antaranya
+    for (int v = 0; v < V; ++v) {
+      int r = cellOf[v] / n, c = cellOf[v] % n;
+      for (int f = 0; f < 4; ++f) {
+        for (int s = 1; s <= 2; ++s) {
+          int sg = (s == 1) ? 1 : -1;
+          int rr = r + sg * dr[f], cc = c + sg * dc[f];
+          while (rr >= 0 && rr < n && cc >= 0 && cc < n && grid[rr][cc] != 'W') {
+            setBit(adj[v], vid[rr * n + cc]);
+            rr += sg * dr[f];
+            cc += sg * dc[f];
+          }
+        }
+      }
+    }
+  }
 
-inline int first(const Set& s) {
-    for (int i = 0; i < WORDS; i++) if (s.w[i]) return i * 64 + __builtin_ctzll(s.w[i]);
-    return -1;
-}
+  void record(int size) {
+    std::vector<std::pair<int, int> > b;
+    b.reserve(size);
+    for (int i = 0; i < size; ++i) b.push_back(std::make_pair(cellOf[chosen[i]] / n, cellOf[chosen[i]] % n));
+    out.push_back(std::move(b));
+  }
 
-inline void clearBit(Set& s, int v) {
-    s.w[v >> 6] &= ~(1ULL << (v & 63));
-}
-
-inline void setBit(Set& s, int v) {
-    s.w[v >> 6] |= 1ULL << (v & 63);
-}
-
-inline bool pruned(int bound) {
-    return collect ? bound < best : bound <= best;
-}
-
-void leaf(int size) {
-    if (!collect) {
+  void expand(Bits P, int size) {
+    if (isEmpty(P)) {
+      if (!enumerate) {
         if (size > best) best = size;
-        return;
+      } else if (size == best) {
+        record(size);
+      }
+      return;
     }
-    if (size == best) {
-        std::vector<std::pair<int, int>> board;
-        board.reserve(size);
-        for (int i = 0; i < size; i++) board.emplace_back(cellOf[cur[i]] / N, cellOf[cur[i]] % N);
-        out->push_back(std::move(board));
+    unsigned char order[144], col[144];
+    int cnt = 0, k = 0;
+    Bits U = P;
+    while (!isEmpty(U)) {
+      ++k;
+      Bits Q = U;
+      while (!isEmpty(Q)) {
+        int v = lowest(Q);
+        order[cnt] = (unsigned char)v;
+        col[cnt] = (unsigned char)k;
+        ++cnt;
+        clearBit(U, v);
+        Q = andB(Q, adj[v]);
+      }
     }
-}
-
-void expand(int cnt, Set P) {
-    unsigned char order[MAXV];
-    unsigned char colr[MAXV];
-    int m = 0;
-    int kmin = best - cnt + (collect ? 0 : 1);
-    Set U = P;
-    int k = 0;
-    while (!empty(U)) {
-        k++;
-        Set Q = U;
-        while (!empty(Q)) {
-            int v = first(Q);
-            clearBit(Q, v);
-            clearBit(U, v);
-            for (int i = 0; i < WORDS; i++) Q.w[i] &= ~compat[v].w[i];
-            if (k >= kmin) {
-                order[m] = (unsigned char)v;
-                colr[m] = (unsigned char)k;
-                m++;
-            }
-        }
+    const int need = enumerate ? best : best + 1;
+    for (int i = cnt - 1; i >= 0; --i) {
+      if (size + col[i] < need) return;
+      int v = order[i];
+      chosen[size] = v;
+      Bits Q = andNot(P, adj[v]);
+      clearBit(Q, v);
+      expand(Q, size + 1);
+      clearBit(P, v);
     }
-    for (int i = m - 1; i >= 0; i--) {
-        if (pruned(cnt + colr[i])) return;
-        int v = order[i];
-        cur[cnt] = v;
-        Set np;
-        for (int j = 0; j < WORDS; j++) np.w[j] = P.w[j] & compat[v].w[j];
-        if (empty(np)) leaf(cnt + 1);
-        else expand(cnt + 1, np);
-        clearBit(P, v);
-    }
-}
+  }
 
-inline int absv(int x) {
-    return x < 0 ? -x : x;
-}
-}
-
-std::vector<std::vector<std::pair<int, int>>> solveWalled(int n, const std::vector<std::string>& grid) {
-    std::vector<std::vector<std::pair<int, int>>> res;
-    if (n < 1 || n * n > MAXV) return res;
-    N = n;
-
-    int total = n * n;
-    std::vector<char> isFree(total);
-    int V = 0;
-    for (int r = 0; r < n; r++)
-        for (int c = 0; c < n; c++) {
-            isFree[r * n + c] = grid[r][c] != 'W';
-            if (isFree[r * n + c]) V++;
-        }
-    if (V == 0) {
-        res.push_back(std::vector<std::pair<int, int>>());
-        return res;
-    }
-
-    std::vector<int> rowSeg(total, -1), colSeg(total, -1), d1Seg(total, -1), d2Seg(total, -1);
-    int nr = 0, nc = 0, n1 = 0, n2 = 0;
-    for (int r = 0; r < n; r++) {
-        for (int c = 0; c < n; c++) {
-            int i = r * n + c;
-            if (!isFree[i]) continue;
-            rowSeg[i] = (c > 0 && isFree[i - 1]) ? rowSeg[i - 1] : nr++;
-            colSeg[i] = (r > 0 && isFree[i - n]) ? colSeg[i - n] : nc++;
-            d1Seg[i] = (r > 0 && c > 0 && isFree[i - n - 1]) ? d1Seg[i - n - 1] : n1++;
-            d2Seg[i] = (r > 0 && c < n - 1 && isFree[i - n + 1]) ? d2Seg[i - n + 1] : n2++;
-        }
-    }
-
-    std::vector<int> cells;
-    cells.reserve(V);
-    for (int i = 0; i < total; i++)
-        if (isFree[i]) cells.push_back(i);
-
-    if (total - V > n / 2) {
-        std::stable_sort(cells.begin(), cells.end(), [&](int x, int y) {
-            int dx = std::max(absv(2 * (x / n) - (n - 1)), absv(2 * (x % n) - (n - 1)));
-            int dy = std::max(absv(2 * (y / n) - (n - 1)), absv(2 * (y % n) - (n - 1)));
-            return dx > dy;
-        });
-    }
-
-    for (int i = 0; i < V; i++) {
-        cellOf[i] = cells[i];
-        for (int j = 0; j < WORDS; j++) compat[i].w[j] = 0;
-    }
-    for (int a = 0; a < V; a++) {
-        int x = cells[a];
-        for (int b = a + 1; b < V; b++) {
-            int y = cells[b];
-            bool attack = rowSeg[x] == rowSeg[y] || colSeg[x] == colSeg[y] || d1Seg[x] == d1Seg[y] || d2Seg[x] == d2Seg[y];
-            if (!attack) {
-                setBit(compat[a], b);
-                setBit(compat[b], a);
-            }
-        }
-    }
-
-    Set all;
-    for (int j = 0; j < WORDS; j++) all.w[j] = 0;
-    for (int i = 0; i < V; i++) setBit(all, i);
-
-    out = &res;
+  void solve() {
+    Bits all; all.a = all.b = all.c = 0;
+    for (int v = 0; v < V; ++v) setBit(all, v);
     best = 0;
-    collect = false;
-    expand(0, all);
-    collect = true;
-    expand(0, all);
+    enumerate = false;
+    expand(all, 0);
+    enumerate = true;
+    expand(all, 0);
+  }
+};
+
+std::vector<std::vector<std::pair<int, int> > > solveWalled(
+    int n, const std::vector<std::string>& grid) {
+  bool anyWall = false;
+  for (int r = 0; r < n && !anyWall; ++r)
+    for (int c = 0; c < n; ++c)
+      if (grid[r][c] == 'W') { anyWall = true; break; }
+  if (!anyWall) {
+    std::vector<std::vector<std::pair<int, int> > > res;
+    BitSearch bs;
+    bs.n = n;
+    bs.full = (1u << n) - 1u;
+    bs.out = &res;
+    bs.go(0, 0, 0, 0);
     return res;
+  }
+  WallSearch ws;
+  ws.build(n, grid);
+  ws.solve();
+  return std::move(ws.out);
 }
